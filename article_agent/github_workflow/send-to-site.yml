@@ -1,0 +1,71 @@
+# این فایل را در ریپوی «خروجی مقاله‌ها» (مثلاً kifshow-articles) در مسیر
+# .github/workflows/send-to-site.yml قرار دهید.
+#
+# هر بار که نوت‌بوک Kaggle یک فایل جدید در پوشه‌ی articles/ می‌گذارد، این Action آن را به سایت می‌فرستد.
+# سایت مقاله را «در انتظار تایید» ذخیره می‌کند؛ بعد از تایید شما در پنل مدیریت منتشر می‌شود.
+#
+# Secrets لازم (Settings > Secrets and variables > Actions):
+#   SITE_IMPORT_URL    مثال:  https://kifshow.ir/api/articles/import/
+#   SITE_IMPORT_TOKEN  همان مقدار ARTICLE_IMPORT_TOKEN که روی سرور تنظیم شده
+name: send-articles-to-site
+
+on:
+  push:
+    branches: [main]
+    paths: ['articles/*.json']
+  workflow_dispatch:
+    inputs:
+      file:
+        description: 'ارسال دستی یک فایل مشخص (مثلاً articles/2026-10-21.json)'
+        required: false
+
+concurrency:
+  group: send-articles
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Send new articles
+        env:
+          URL: ${{ secrets.SITE_IMPORT_URL }}
+          TOKEN: ${{ secrets.SITE_IMPORT_TOKEN }}
+          MANUAL_FILE: ${{ github.event.inputs.file }}
+        run: |
+          set -u
+          if [ -z "${URL:-}" ] || [ -z "${TOKEN:-}" ]; then
+            echo "::error::Secrets SITE_IMPORT_URL و SITE_IMPORT_TOKEN تنظیم نشده‌اند"; exit 1
+          fi
+
+          if [ -n "${MANUAL_FILE:-}" ]; then
+            FILES="$MANUAL_FILE"
+          else
+            # فقط فایل‌های جدید یا تغییرکرده‌ی همین push
+            FILES=$(git diff --name-only --diff-filter=AM HEAD^ HEAD -- 'articles/*.json' || true)
+          fi
+          [ -z "$FILES" ] && { echo "فایل جدیدی نیست"; exit 0; }
+
+          FAILED=0
+          for f in $FILES; do
+            echo "== $f"
+            for attempt in 1 2 3; do
+              CODE=$(curl -sS -o resp.json -w '%{http_code}' -X POST "$URL" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                --data-binary @"$f" --max-time 60 || echo 000)
+              echo "HTTP $CODE: $(head -c 300 resp.json 2>/dev/null)"
+              case "$CODE" in
+                200|201) break ;;                       # ساخته شد یا از قبل بوده
+                422|400|401|413) FAILED=1; break ;;     # خطای دائمی؛ تکرار فایده ندارد
+                *) sleep $((attempt * 20)) ;;           # خطای موقت/Cloudflare/شبکه: دوباره
+              esac
+              [ "$attempt" = 3 ] && FAILED=1
+            done
+          done
+          exit $FAILED
