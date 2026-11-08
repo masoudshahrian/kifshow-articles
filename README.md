@@ -1,1 +1,1 @@
-That is a great blog writer that is I ever seen.
+That is one of the greatest blog writers I have ever seen.
